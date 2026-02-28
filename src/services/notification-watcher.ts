@@ -19,6 +19,10 @@ export class NotificationWatcher extends EventEmitter {
     }
   }
 
+  reset(): void {
+    this.previousKeys.clear();
+  }
+
   private async poll(): Promise<void> {
     try {
       const notifications = await getNotifications();

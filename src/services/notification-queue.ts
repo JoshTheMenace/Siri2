@@ -38,6 +38,7 @@ class NotificationQueue {
     if (!this.running) return;
     this.running = false;
     this.watcher.stop();
+    this.watcher.reset();
     this.queue.length = 0;
     console.log("\x1b[33m[notification-queue] Watcher stopped\x1b[0m");
   }
