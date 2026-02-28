@@ -385,7 +385,7 @@ export async function runAgent(userText: string, options?: AgentOptions): Promis
 // ---------------------------------------------------------------------------
 
 export interface TriageResult {
-  action: "ignore" | "log" | "act";
+  action: "ignore" | "log" | "alert" | "act";
   reason: string;
 }
 
@@ -410,7 +410,7 @@ export async function runTriageAgent(notification: {
       ]
     : NOTIFICATION_TRIAGE_PROMPT;
 
-  const maxTriageTurns = 5;
+  const maxTriageTurns = 50;
   let turnCount = 0;
   let lastText = "";
 
@@ -542,6 +542,7 @@ export async function runTriageAgent(notification: {
   // Parse the triage decision from the last text
   const lower = lastText.toLowerCase();
   if (lower.includes("act")) return { action: "act", reason: lastText };
+  if (lower.includes("alert")) return { action: "alert", reason: lastText };
   if (lower.includes("log")) return { action: "log", reason: lastText };
   return { action: "ignore", reason: lastText };
 }

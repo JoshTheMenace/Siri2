@@ -77,7 +77,9 @@ function matchesCron(expression: string, now: Date): boolean {
 // Scheduler
 // ---------------------------------------------------------------------------
 
-const TASKS_FILE = join(homedir(), ".siri2", "scheduled-tasks.json");
+const SIRI2_DIR = join(homedir(), ".siri2");
+const TASKS_FILE = join(SIRI2_DIR, "scheduled-tasks.json");
+const STATE_FILE = join(SIRI2_DIR, "scheduler-state.json");
 const MAX_LOG_ENTRIES = 100;
 
 class Scheduler {
@@ -88,6 +90,10 @@ class Scheduler {
 
   constructor() {
     this.loadTasks();
+    // Auto-start if it was running before the server restarted
+    if (this.loadRunningState()) {
+      this.start();
+    }
   }
 
   // --- Lifecycle ---
@@ -95,6 +101,7 @@ class Scheduler {
   start(): void {
     if (this.intervalHandle) return;
     this.intervalHandle = setInterval(() => this.tick(), 60_000);
+    this.saveRunningState(true);
     console.log("\x1b[32m[scheduler] Started (60s interval)\x1b[0m");
   }
 
@@ -102,6 +109,7 @@ class Scheduler {
     if (!this.intervalHandle) return;
     clearInterval(this.intervalHandle);
     this.intervalHandle = null;
+    this.saveRunningState(false);
     console.log("\x1b[33m[scheduler] Stopped\x1b[0m");
   }
 
@@ -195,6 +203,7 @@ class Scheduler {
 
     const lockOwner = `scheduled-task-${task.id}-${Date.now()}`;
     let entry: ScheduleLogEntry;
+    let wokeDevice = false;
 
     try {
       // Check if device locked by user — skip if so
@@ -228,6 +237,7 @@ class Scheduler {
           this.addLogEntry(entry);
           return entry;
         }
+        wokeDevice = true;
       }
 
       // Acquire lock
@@ -273,10 +283,12 @@ class Scheduler {
     } finally {
       deviceLock.release(lockOwner);
 
-      // Sleep device after task
-      try {
-        await sleepDevice();
-      } catch {}
+      // Only sleep the device if we woke it up
+      if (wokeDevice) {
+        try {
+          await sleepDevice();
+        } catch {}
+      }
     }
 
     this.addLogEntry(entry!);
@@ -292,8 +304,7 @@ class Scheduler {
   }
 
   private persist(): void {
-    const dir = join(homedir(), ".siri2");
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    if (!existsSync(SIRI2_DIR)) mkdirSync(SIRI2_DIR, { recursive: true });
     writeFileSync(TASKS_FILE, JSON.stringify(this.tasks, null, 2), "utf-8");
   }
 
@@ -304,6 +315,21 @@ class Scheduler {
       console.log(`\x1b[90m[scheduler] Loaded ${this.tasks.length} tasks from disk\x1b[0m`);
     } catch {
       this.tasks = [];
+    }
+  }
+
+  private saveRunningState(running: boolean): void {
+    if (!existsSync(SIRI2_DIR)) mkdirSync(SIRI2_DIR, { recursive: true });
+    writeFileSync(STATE_FILE, JSON.stringify({ running }), "utf-8");
+  }
+
+  private loadRunningState(): boolean {
+    if (!existsSync(STATE_FILE)) return false;
+    try {
+      const data = JSON.parse(readFileSync(STATE_FILE, "utf-8"));
+      return data.running === true;
+    } catch {
+      return false;
     }
   }
 }
