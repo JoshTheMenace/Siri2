@@ -12,11 +12,11 @@ import { homedir } from "node:os";
 // ---------------------------------------------------------------------------
 
 const CONFIG = {
-  model: process.env.AGENT_MODEL || "claude-sonnet-4-6",
+  model: process.env.AGENT_MODEL || "claude-haiku-4-5-20251001",
   authToken: process.env.ANTHROPIC_AUTH_TOKEN || "",
   apiKey: process.env.ANTHROPIC_API_KEY || "",
   maxTokens: parseInt(process.env.MAX_TOKENS || "8192"),
-  maxToolTurns: parseInt(process.env.MAX_TOOL_TURNS || "20"),
+  maxToolTurns: parseInt(process.env.MAX_TOOL_TURNS || "300"),
   debug: process.env.DEBUG === "1",
   sessionDir: process.env.SESSION_DIR || join(homedir(), ".siri2"),
 };
