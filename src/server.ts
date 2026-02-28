@@ -20,11 +20,16 @@ app.post("/command", async (req, res) => {
     return;
   }
 
+  const lockOwner = `command-${Date.now()}`;
+  ctx.deviceLock.acquire(lockOwner, "user");
+
   try {
-    const result = await runAgent(prompt);
+    const result = await runAgent(prompt, { agentId: lockOwner });
     res.json({ result: result.text, turns: result.turns });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+  } finally {
+    ctx.deviceLock.release(lockOwner);
   }
 });
 

@@ -24,7 +24,7 @@ class ScreenIndicator {
   }
 
   private async onLockChange(state: LockState): Promise<void> {
-    if (state.locked && state.ownerType === "notification-agent") {
+    if (state.locked) {
       if (!this.shown) await this.showNotification();
     } else {
       if (this.shown) await this.hideNotification();
