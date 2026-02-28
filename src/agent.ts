@@ -37,10 +37,11 @@ export async function runAgent(prompt: string): Promise<AgentResult> {
     },
   })) {
     if (message.type === "assistant") {
-      // Extract text from assistant message content blocks
       for (const block of message.message.content) {
         if (block.type === "text") {
           resultText = block.text;
+          // Print assistant text as it arrives
+          process.stderr.write(block.text);
         }
       }
     }
@@ -51,8 +52,8 @@ export async function runAgent(prompt: string): Promise<AgentResult> {
       } else {
         resultText = `Agent ended: ${message.subtype}${message.result ? " - " + message.result : ""}`;
       }
-      turns = message.num_turns ?? 0;
-      costUsd = message.total_cost_usd ?? 0;
+      turns = (message as any).num_turns ?? 0;
+      costUsd = (message as any).total_cost_usd ?? 0;
     }
   }
 
