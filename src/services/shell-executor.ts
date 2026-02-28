@@ -25,10 +25,14 @@ export function executeShell(
     asRoot = true,
   } = options;
 
-  const fullCommand = asRoot ? `su -c ${shellQuote(command)}` : command;
+  // Unset LD_LIBRARY_PATH so system binaries (screencap, uiautomator, monkey, etc.)
+  // don't load Termux libs instead of /system/lib64 ones.
+  const wrappedCommand = asRoot
+    ? `su -c ${shellQuote(`sh -c "unset LD_LIBRARY_PATH; ${command.replace(/"/g, '\\"')}"`)}`
+    : command;
 
   return new Promise((resolve) => {
-    exec(fullCommand, { timeout, maxBuffer }, (error, stdout, stderr) => {
+    exec(wrappedCommand, { timeout, maxBuffer }, (error, stdout, stderr) => {
       resolve({
         stdout: stdout?.toString() ?? "",
         stderr: stderr?.toString() ?? "",

@@ -363,6 +363,8 @@ export async function runAgent(userText: string, options?: AgentOptions): Promis
           tool_use_id: block.id,
           content: truncate(resultStr),
         });
+        // Keep lock alive while agent is actively working
+        if (agentId) deviceLock.refresh(agentId);
       } catch (err: any) {
         toolResults.push({
           type: "tool_result",

@@ -9,7 +9,7 @@ export interface LockState {
 
 type StateChangeCallback = (state: LockState) => void;
 
-const DEFAULT_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes
+const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 
 class DeviceLock {
   private owner: string | null = null;
@@ -82,6 +82,13 @@ class DeviceLock {
 
   isLocked(): boolean {
     return this.owner !== null;
+  }
+
+  /** Reset the auto-timeout — call on each tool use to keep the lock alive. */
+  refresh(owner: string, timeoutMs = DEFAULT_TIMEOUT_MS): boolean {
+    if (this.owner !== owner) return false;
+    this.resetTimeout(timeoutMs);
+    return true;
   }
 
   onStateChange(cb: StateChangeCallback): () => void {
