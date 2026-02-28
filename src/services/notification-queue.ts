@@ -1,6 +1,7 @@
 import { NotificationWatcher } from "./notification-watcher.js";
 import { notificationFilter } from "./notification-filter.js";
 import { deviceLock } from "./device-lock.js";
+import { isScreenOn, wakeAndUnlock, sleepDevice } from "./device-wake.js";
 import { runTriageAgent, type TriageResult } from "../agent.js";
 import type { NotificationInfo } from "../types/notification.js";
 
@@ -86,11 +87,24 @@ class NotificationQueue {
         continue;
       }
 
+      // Wake device if screen is off
+      let wokeDevice = false;
+      const screenOn = await isScreenOn();
+      if (!screenOn) {
+        const unlocked = await wakeAndUnlock();
+        if (!unlocked) {
+          this.addLogEntry(notification, "skip", "Failed to wake/unlock device");
+          continue;
+        }
+        wokeDevice = true;
+      }
+
       // Acquire device lock
       const agentOwner = `notification-agent-${Date.now()}`;
       const acquired = deviceLock.acquire(agentOwner, "notification-agent");
       if (!acquired) {
         this.addLogEntry(notification, "skip", "Could not acquire device lock");
+        if (wokeDevice) { try { await sleepDevice(); } catch {} }
         continue;
       }
 
@@ -109,6 +123,7 @@ class NotificationQueue {
         console.error(`\x1b[31m[notification-queue] Triage error: ${err.message}\x1b[0m`);
       } finally {
         deviceLock.release(agentOwner);
+        if (wokeDevice) { try { await sleepDevice(); } catch {} }
       }
     }
 
