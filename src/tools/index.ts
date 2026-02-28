@@ -196,9 +196,20 @@ export const toolDefs = [
       required: ["text"],
     },
     async (args) => {
-      const escaped = args.text.replace(/ /g, "%s");
-      const r = await executeShell(`input text '${escaped}'`);
-      return JSON.stringify({ ok: r.exitCode === 0, typed: args.text });
+      const text: string = args.text;
+      // Type in chunks of 4 chars with 30ms delays to avoid misspelling
+      const CHUNK = 4;
+      for (let i = 0; i < text.length; i += CHUNK) {
+        const chunk = text.slice(i, i + CHUNK).replace(/ /g, "%s");
+        const r = await executeShell(`input text '${chunk}'`);
+        if (r.exitCode !== 0) {
+          return JSON.stringify({ ok: false, typed: text.slice(0, i), error: "input failed mid-type" });
+        }
+        if (i + CHUNK < text.length) {
+          await new Promise((r) => setTimeout(r, 30));
+        }
+      }
+      return JSON.stringify({ ok: true, typed: text });
     }
   ),
 
