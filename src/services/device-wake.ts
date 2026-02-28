@@ -3,8 +3,14 @@ import { executeShell } from "./shell-executor.js";
 const DEVICE_PIN = process.env.DEVICE_PIN || "";
 
 export async function isScreenOn(): Promise<boolean> {
-  const r = await executeShell("dumpsys display | grep mScreenState", { timeout: 5000 });
-  return r.stdout.includes("ON");
+  const [display, keyguard] = await Promise.all([
+    executeShell("dumpsys display | grep mScreenState", { timeout: 5000 }),
+    executeShell("dumpsys window | grep isKeyguardShowing", { timeout: 5000 }),
+  ]);
+  const screenOn = display.stdout.includes("ON");
+  const locked = keyguard.stdout.includes("isKeyguardShowing=true");
+  // Screen is only usable if it's on AND not behind the lock screen
+  return screenOn && !locked;
 }
 
 export async function wakeAndUnlock(): Promise<boolean> {
