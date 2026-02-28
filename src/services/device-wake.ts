@@ -30,17 +30,20 @@ export async function wakeAndUnlock(): Promise<boolean> {
   // Enter PIN
   await executeShell(`input text ${DEVICE_PIN}`);
   await executeShell("input keyevent KEYCODE_ENTER");
-  await sleep(500);
 
-  // Verify screen is on
-  const on = await isScreenOn();
-  if (!on) {
-    console.log("\x1b[31m[device-wake] Failed to wake/unlock device\x1b[0m");
-    return false;
+  // Wait for keyguard to dismiss — can take 1-2 seconds
+  for (let i = 0; i < 5; i++) {
+    await sleep(800);
+    const on = await isScreenOn();
+    if (on) {
+      console.log("\x1b[32m[device-wake] Device woken and unlocked\x1b[0m");
+      return true;
+    }
   }
 
-  console.log("\x1b[32m[device-wake] Device woken and unlocked\x1b[0m");
-  return true;
+  console.log("\x1b[31m[device-wake] Failed to wake/unlock device\x1b[0m");
+  return false;
+
 }
 
 export async function sleepDevice(): Promise<void> {
