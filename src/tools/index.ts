@@ -1,6 +1,7 @@
 import { executeShell } from "../services/shell-executor.js";
 import { parseUiDump } from "../services/xml-parser.js";
 import { getNotifications } from "../services/notification-watcher.js";
+import { scheduler } from "../services/scheduler.js";
 
 // ---------------------------------------------------------------------------
 // UI tools that require device lock
@@ -246,6 +247,103 @@ export const toolDefs = [
         wifi: wifi.stdout.trim(),
         display: display.stdout.trim(),
         foreground: activity.stdout.trim(),
+      });
+    }
+  ),
+
+  // ---------------------------------------------------------------------------
+  // Schedule management tools
+  // ---------------------------------------------------------------------------
+
+  defineTool(
+    "create_schedule",
+    "Create a scheduled task that runs on a cron schedule. The agent will be woken up, the phone unlocked, the prompt executed, and the phone re-locked. Use 5-field cron: min hour dom month dow. Examples: '0 1 * * *' = 1am daily, '*/5 * * * *' = every 5 min, '0 9 * * 1-5' = 9am weekdays.",
+    {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Human-readable name for this scheduled task" },
+        prompt: { type: "string", description: "Full prompt to send to the agent when this task fires" },
+        cron_expression: { type: "string", description: "5-field cron expression (min hour dom month dow)" },
+      },
+      required: ["name", "prompt", "cron_expression"],
+    },
+    async (args) => {
+      const task = scheduler.addTask({
+        name: args.name,
+        prompt: args.prompt,
+        cronExpression: args.cron_expression,
+      });
+      return JSON.stringify({
+        ok: true,
+        task: {
+          id: task.id,
+          name: task.name,
+          cronExpression: task.cronExpression,
+          enabled: task.enabled,
+        },
+        message: `Schedule created: "${task.name}" with cron ${task.cronExpression}`,
+      });
+    }
+  ),
+
+  defineTool(
+    "list_schedules",
+    "List all scheduled tasks with their IDs, names, cron expressions, enabled state, and last run info.",
+    { type: "object", properties: {} },
+    async () => {
+      const tasks = scheduler.getTasks();
+      return JSON.stringify({
+        ok: true,
+        count: tasks.length,
+        tasks: tasks.map((t) => ({
+          id: t.id,
+          name: t.name,
+          cronExpression: t.cronExpression,
+          enabled: t.enabled,
+          lastRunAt: t.lastRunAt ? new Date(t.lastRunAt).toISOString() : null,
+          lastResult: t.lastResult,
+        })),
+      });
+    }
+  ),
+
+  defineTool(
+    "remove_schedule",
+    "Remove a scheduled task by ID.",
+    {
+      type: "object",
+      properties: {
+        schedule_id: { type: "string", description: "ID of the schedule to remove" },
+      },
+      required: ["schedule_id"],
+    },
+    async (args) => {
+      const removed = scheduler.removeTask(args.schedule_id);
+      return JSON.stringify({
+        ok: removed,
+        message: removed ? "Schedule removed" : "Schedule not found",
+      });
+    }
+  ),
+
+  defineTool(
+    "toggle_schedule",
+    "Enable or disable a scheduled task.",
+    {
+      type: "object",
+      properties: {
+        schedule_id: { type: "string", description: "ID of the schedule to toggle" },
+        enabled: { type: "boolean", description: "true to enable, false to disable" },
+      },
+      required: ["schedule_id", "enabled"],
+    },
+    async (args) => {
+      const ok = args.enabled
+        ? scheduler.enableTask(args.schedule_id)
+        : scheduler.disableTask(args.schedule_id);
+      return JSON.stringify({
+        ok,
+        message: ok ? `Schedule ${args.enabled ? "enabled" : "disabled"}` : "Schedule not found",
       });
     }
   ),

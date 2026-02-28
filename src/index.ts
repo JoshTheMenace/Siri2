@@ -26,7 +26,7 @@ if (isInteractive) {
     "================================\n" +
     "  Siri2 - Android AI Agent\n" +
     "================================\x1b[0m\n" +
-    "\x1b[90mCommands: /quit /save /load /clear /watch /lock /filter /help\x1b[0m\n"
+    "\x1b[90mCommands: /quit /save /load /clear /watch /lock /filter /schedule /help\x1b[0m\n"
   );
 
   function showPrompt() {
@@ -143,6 +143,91 @@ if (isInteractive) {
           }
           break;
 
+        case "/schedule":
+          switch (subCmd) {
+            case "list": {
+              const tasks = ctx.scheduler.getTasks();
+              if (tasks.length === 0) {
+                console.log("\x1b[90mNo scheduled tasks.\x1b[0m");
+              } else {
+                for (const t of tasks) {
+                  const state = t.enabled ? "\x1b[32mON \x1b[0m" : "\x1b[31mOFF\x1b[0m";
+                  const lastRun = t.lastRunAt ? new Date(t.lastRunAt).toLocaleString() : "never";
+                  console.log(`  ${state} ${t.id} | ${t.cronExpression.padEnd(11)} | ${t.name}`);
+                  console.log(`       \x1b[90mlast run: ${lastRun}\x1b[0m`);
+                }
+              }
+              break;
+            }
+            case "remove": {
+              if (!subArg) {
+                console.log("\x1b[33mUsage: /schedule remove <id>\x1b[0m");
+              } else {
+                const ok = ctx.scheduler.removeTask(subArg);
+                console.log(ok ? `\x1b[32mRemoved: ${subArg}\x1b[0m` : `\x1b[31mNot found: ${subArg}\x1b[0m`);
+              }
+              break;
+            }
+            case "run": {
+              if (!subArg) {
+                console.log("\x1b[33mUsage: /schedule run <id>\x1b[0m");
+              } else {
+                console.log(`\x1b[90mRunning task ${subArg}...\x1b[0m`);
+                const entry = await ctx.scheduler.runNow(subArg);
+                if (!entry) {
+                  console.log(`\x1b[31mNot found: ${subArg}\x1b[0m`);
+                } else {
+                  console.log(`  ${entry.success ? "\x1b[32mOK" : "\x1b[31mFAIL"}\x1b[0m (${entry.turns} turns)`);
+                  console.log(`  \x1b[90m${entry.result.slice(0, 200)}\x1b[0m`);
+                }
+              }
+              break;
+            }
+            case "enable": {
+              if (!subArg) {
+                console.log("\x1b[33mUsage: /schedule enable <id>\x1b[0m");
+              } else {
+                const ok = ctx.scheduler.enableTask(subArg);
+                console.log(ok ? `\x1b[32mEnabled: ${subArg}\x1b[0m` : `\x1b[31mNot found: ${subArg}\x1b[0m`);
+              }
+              break;
+            }
+            case "disable": {
+              if (!subArg) {
+                console.log("\x1b[33mUsage: /schedule disable <id>\x1b[0m");
+              } else {
+                const ok = ctx.scheduler.disableTask(subArg);
+                console.log(ok ? `\x1b[33mDisabled: ${subArg}\x1b[0m` : `\x1b[31mNot found: ${subArg}\x1b[0m`);
+              }
+              break;
+            }
+            case "log": {
+              const log = ctx.scheduler.getLog();
+              if (log.length === 0) {
+                console.log("\x1b[90mNo execution log entries.\x1b[0m");
+              } else {
+                for (const entry of log.slice(-20)) {
+                  const time = new Date(entry.timestamp).toLocaleTimeString();
+                  const status = entry.success ? "\x1b[32mOK  \x1b[0m" : "\x1b[31mFAIL\x1b[0m";
+                  console.log(`  \x1b[90m${time}\x1b[0m ${status} ${entry.taskName} (${entry.turns} turns)`);
+                  console.log(`       \x1b[90m${entry.result.slice(0, 100)}\x1b[0m`);
+                }
+              }
+              break;
+            }
+            case "start":
+              ctx.scheduler.start();
+              console.log("\x1b[32mScheduler started.\x1b[0m");
+              break;
+            case "stop":
+              ctx.scheduler.stop();
+              console.log("\x1b[33mScheduler stopped.\x1b[0m");
+              break;
+            default:
+              console.log("\x1b[33mUsage: /schedule list|remove <id>|run <id>|enable <id>|disable <id>|log|start|stop\x1b[0m");
+          }
+          break;
+
         case "/help":
           console.log(
             "/quit             Exit (saves session)\n" +
@@ -157,7 +242,15 @@ if (isInteractive) {
             "/lock release     Force-release device lock\n" +
             "/filter list      Show whitelisted packages\n" +
             "/filter add <pkg> Add package to whitelist\n" +
-            "/filter remove <pkg> Remove package from whitelist"
+            "/filter remove <pkg> Remove package from whitelist\n" +
+            "/schedule list    Show scheduled tasks\n" +
+            "/schedule remove <id>  Remove a task\n" +
+            "/schedule run <id>     Run task now\n" +
+            "/schedule enable <id>  Enable a task\n" +
+            "/schedule disable <id> Disable a task\n" +
+            "/schedule log     Show execution log\n" +
+            "/schedule start   Start scheduler loop\n" +
+            "/schedule stop    Stop scheduler loop"
           );
           break;
         default:

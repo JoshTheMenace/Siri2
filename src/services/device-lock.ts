@@ -1,4 +1,4 @@
-export type OwnerType = "user" | "notification-agent";
+export type OwnerType = "user" | "notification-agent" | "scheduled-task";
 
 export interface LockState {
   locked: boolean;
@@ -34,9 +34,9 @@ class DeviceLock {
       return true;
     }
 
-    // User always preempts notification-agent
+    // User always preempts notification-agent and scheduled-task
     if (this.owner !== null) {
-      if (ownerType === "user" && this.ownerType === "notification-agent") {
+      if (ownerType === "user" && (this.ownerType === "notification-agent" || this.ownerType === "scheduled-task")) {
         this.clearTimeout();
         this.owner = owner;
         this.ownerType = ownerType;

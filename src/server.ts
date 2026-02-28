@@ -110,6 +110,78 @@ app.post("/filter/whitelist/remove", (req, res) => {
   res.json({ ok: true, packages: ctx.notificationFilter.getWhitelist() });
 });
 
+// ---------------------------------------------------------------------------
+// Scheduler endpoints
+// ---------------------------------------------------------------------------
+
+app.get("/scheduler/tasks", (_req, res) => {
+  const tasks = ctx.scheduler.getTasks();
+  res.json({
+    tasks: tasks.map((t) => ({
+      ...t,
+      lastRunAt: t.lastRunAt ? new Date(t.lastRunAt).toISOString() : null,
+      createdAt: new Date(t.createdAt).toISOString(),
+    })),
+  });
+});
+
+app.post("/scheduler/tasks", (req, res) => {
+  const { name, prompt, cronExpression } = req.body;
+  if (!name || !prompt || !cronExpression) {
+    res.status(400).json({ error: "Missing name, prompt, or cronExpression" });
+    return;
+  }
+  const task = ctx.scheduler.addTask({ name, prompt, cronExpression });
+  res.json({ ok: true, task });
+});
+
+app.delete("/scheduler/tasks/:id", (req, res) => {
+  const removed = ctx.scheduler.removeTask(req.params.id);
+  res.json({ ok: removed, message: removed ? "Removed" : "Not found" });
+});
+
+app.post("/scheduler/tasks/:id/run", async (req, res) => {
+  const entry = await ctx.scheduler.runNow(req.params.id);
+  if (!entry) {
+    res.status(404).json({ error: "Task not found" });
+    return;
+  }
+  res.json({ ok: entry.success, entry });
+});
+
+app.post("/scheduler/tasks/:id/toggle", (req, res) => {
+  const { enabled } = req.body;
+  if (typeof enabled !== "boolean") {
+    res.status(400).json({ error: "Missing 'enabled' boolean" });
+    return;
+  }
+  const ok = enabled
+    ? ctx.scheduler.enableTask(req.params.id)
+    : ctx.scheduler.disableTask(req.params.id);
+  res.json({ ok, message: ok ? `Task ${enabled ? "enabled" : "disabled"}` : "Not found" });
+});
+
+app.get("/scheduler/log", (_req, res) => {
+  res.json({ log: ctx.scheduler.getLog() });
+});
+
+app.post("/scheduler/start", (_req, res) => {
+  ctx.scheduler.start();
+  res.json({ ok: true, message: "Scheduler started" });
+});
+
+app.post("/scheduler/stop", (_req, res) => {
+  ctx.scheduler.stop();
+  res.json({ ok: true, message: "Scheduler stopped" });
+});
+
+app.get("/scheduler/status", (_req, res) => {
+  res.json({
+    running: ctx.scheduler.isRunning(),
+    taskCount: ctx.scheduler.getTasks().length,
+  });
+});
+
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Siri2 HTTP server listening on 0.0.0.0:${PORT}`);
 });
