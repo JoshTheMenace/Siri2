@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 // ---------------------------------------------------------------------------
 
 const CONFIG = {
-  model: process.env.AGENT_MODEL || "claude-sonnet-4-20250514",
+  model: process.env.AGENT_MODEL || "claude-sonnet-4-6",
   authToken: process.env.ANTHROPIC_AUTH_TOKEN || "",
   apiKey: process.env.ANTHROPIC_API_KEY || "",
   maxTokens: parseInt(process.env.MAX_TOKENS || "8192"),
