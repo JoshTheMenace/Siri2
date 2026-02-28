@@ -239,7 +239,7 @@ export const toolDefs = [
         executeShell("dumpsys battery | grep -E 'level|status|plugged'"),
         executeShell("dumpsys wifi | grep 'Wi-Fi is' | head -1"),
         executeShell("dumpsys display | grep 'mScreenState' | head -1"),
-        executeShell("dumpsys activity activities | grep 'mResumedActivity' | head -1"),
+        executeShell("dumpsys window | grep 'mFocusedApp' | head -1"),
       ]);
       return JSON.stringify({
         ok: true,
