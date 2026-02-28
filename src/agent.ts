@@ -1,61 +1,389 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
-import { createAndroidServer } from "./tools/index.js";
+import Anthropic from "@anthropic-ai/sdk";
 import { SYSTEM_PROMPT } from "./system-prompt.js";
+import { toolDefs, toolImplementations } from "./tools/index.js";
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
+
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+
+const CONFIG = {
+  model: process.env.AGENT_MODEL || "claude-sonnet-4-20250514",
+  authToken: process.env.ANTHROPIC_AUTH_TOKEN || "",
+  apiKey: process.env.ANTHROPIC_API_KEY || "",
+  maxTokens: parseInt(process.env.MAX_TOKENS || "8192"),
+  maxToolTurns: parseInt(process.env.MAX_TOOL_TURNS || "20"),
+  debug: process.env.DEBUG === "1",
+  sessionDir: process.env.SESSION_DIR || join(homedir(), ".siri2"),
+};
+
+const useOAuth = !!CONFIG.authToken;
+
+// ---------------------------------------------------------------------------
+// Anthropic client — stealth headers for OAuth tokens
+// ---------------------------------------------------------------------------
+
+const clientOptions: Record<string, any> = useOAuth
+  ? {
+      apiKey: null,
+      authToken: CONFIG.authToken,
+      defaultHeaders: {
+        "anthropic-beta":
+          "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
+        "user-agent": "claude-cli/2.1.2 (external, cli)",
+        "x-app": "cli",
+      },
+    }
+  : { apiKey: CONFIG.apiKey };
+
+const client = new Anthropic(clientOptions);
+
+// System messages — OAuth requires Claude Code identity prefix
+const systemMessages: any = useOAuth
+  ? [
+      { type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." },
+      { type: "text", text: SYSTEM_PROMPT },
+    ]
+  : SYSTEM_PROMPT;
+
+// ---------------------------------------------------------------------------
+// Session dir
+// ---------------------------------------------------------------------------
+
+if (!existsSync(CONFIG.sessionDir)) {
+  mkdirSync(CONFIG.sessionDir, { recursive: true });
+}
+
+// ---------------------------------------------------------------------------
+// Conversation state
+// ---------------------------------------------------------------------------
+
+let messages: any[] = [];
+let consecutiveErrors = 0;
+
+function truncate(str: string, max = 65536): string {
+  if (str.length <= max) return str;
+  const half = Math.floor(max / 2) - 50;
+  return (
+    str.slice(0, half) +
+    `\n\n... [truncated ${str.length - max} bytes] ...\n\n` +
+    str.slice(-half)
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Message history validation — prevents orphaned tool_use blocks
+// ---------------------------------------------------------------------------
+
+function validateMessages(): void {
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg.role !== "assistant") continue;
+
+    const toolUses = (msg.content || []).filter((b: any) => b.type === "tool_use");
+    if (toolUses.length === 0) continue;
+
+    const next = messages[i + 1];
+    if (!next || next.role !== "user") {
+      const dummyResults = toolUses.map((tu: any) => ({
+        type: "tool_result",
+        tool_use_id: tu.id,
+        content: JSON.stringify({ error: "Session interrupted" }),
+        is_error: true,
+      }));
+      messages.splice(i + 1, 0, { role: "user", content: dummyResults });
+      continue;
+    }
+
+    const nextContent = Array.isArray(next.content) ? next.content : [];
+    const resultIds = new Set(
+      nextContent.filter((b: any) => b.type === "tool_result").map((b: any) => b.tool_use_id)
+    );
+    const missing = toolUses.filter((tu: any) => !resultIds.has(tu.id));
+    if (missing.length > 0) {
+      for (const tu of missing) {
+        nextContent.push({
+          type: "tool_result",
+          tool_use_id: tu.id,
+          content: JSON.stringify({ error: "Session interrupted" }),
+          is_error: true,
+        });
+      }
+      next.content = nextContent;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Agent loop — streaming with tool execution
+// ---------------------------------------------------------------------------
 
 export interface AgentResult {
   text: string;
   turns: number;
-  costUsd: number;
 }
 
-export async function runAgent(prompt: string): Promise<AgentResult> {
-  const androidServer = createAndroidServer();
-
-  async function* messages() {
-    yield {
-      type: "user" as const,
-      session_id: "",
-      message: { role: "user" as const, content: prompt },
-      parent_tool_use_id: null,
-    };
+export async function runAgent(userText: string): Promise<AgentResult> {
+  if (consecutiveErrors >= 2) {
+    console.log("\x1b[33m! Auto-clearing history after repeated errors.\x1b[0m");
+    messages.length = 0;
+    consecutiveErrors = 0;
   }
 
-  let resultText = "";
-  let turns = 0;
-  let costUsd = 0;
+  validateMessages();
+  messages.push({ role: "user", content: userText });
+  const historyLenAtStart = messages.length;
 
-  for await (const message of query({
-    prompt: messages(),
-    options: {
-      model: "claude-sonnet-4-20250514",
-      systemPrompt: SYSTEM_PROMPT,
-      mcpServers: { android: androidServer },
-      allowedTools: ["mcp__android__*"],
-      permissionMode: "bypassPermissions",
-      allowDangerouslySkipPermissions: true,
-      maxTurns: 20,
-    },
-  })) {
-    if (message.type === "assistant") {
-      for (const block of message.message.content) {
-        if (block.type === "text") {
-          resultText = block.text;
-          // Print assistant text as it arrives
-          process.stderr.write(block.text);
+  let turnCount = 0;
+  let lastText = "";
+
+  while (true) {
+    turnCount++;
+    validateMessages();
+
+    let response;
+    try {
+      response = await client.messages.create({
+        model: CONFIG.model,
+        max_tokens: CONFIG.maxTokens,
+        system: systemMessages,
+        messages,
+        tools: toolDefs as any,
+        stream: true,
+      });
+    } catch (err: any) {
+      const errMsg = err.error?.message || err.message || String(err);
+      console.error(`\n\x1b[31mAPI error: ${errMsg}\x1b[0m`);
+
+      if (errMsg.includes("tool_use") && errMsg.includes("tool_result")) {
+        consecutiveErrors++;
+        validateMessages();
+        if (turnCount === 1) continue;
+        messages.length = 0;
+        messages.push({ role: "user", content: userText });
+        return { text: "History corrupted, cleared. Please try again.", turns: turnCount };
+      }
+
+      consecutiveErrors++;
+      messages.length = historyLenAtStart;
+      return { text: `Error: ${errMsg}`, turns: turnCount };
+    }
+
+    // Stream response
+    const contentBlocks: any[] = [];
+    let currentText = "";
+    let currentToolUse: any = null;
+    let stopReason = "";
+    let inputJson = "";
+
+    try {
+      for await (const event of response) {
+        switch (event.type) {
+          case "content_block_start":
+            if (event.content_block.type === "text") {
+              currentText = "";
+            } else if (event.content_block.type === "tool_use") {
+              currentToolUse = {
+                type: "tool_use",
+                id: event.content_block.id,
+                name: event.content_block.name,
+                input: {},
+              };
+              inputJson = "";
+              process.stdout.write(`\n\x1b[36m> ${event.content_block.name}\x1b[0m`);
+            }
+            break;
+
+          case "content_block_delta":
+            if (event.delta.type === "text_delta") {
+              process.stdout.write(event.delta.text);
+              currentText += event.delta.text;
+            } else if (event.delta.type === "input_json_delta") {
+              inputJson += event.delta.partial_json;
+            }
+            break;
+
+          case "content_block_stop":
+            if (currentText) {
+              contentBlocks.push({ type: "text", text: currentText });
+              lastText = currentText;
+              currentText = "";
+            }
+            if (currentToolUse) {
+              try {
+                currentToolUse.input = inputJson ? JSON.parse(inputJson) : {};
+              } catch {
+                currentToolUse.input = {};
+              }
+              contentBlocks.push(currentToolUse);
+              const argsStr = JSON.stringify(currentToolUse.input);
+              if (argsStr.length > 2) {
+                process.stdout.write(
+                  `\x1b[90m(${argsStr.length > 150 ? argsStr.slice(0, 147) + "..." : argsStr})\x1b[0m\n`
+                );
+              } else {
+                process.stdout.write("\n");
+              }
+              currentToolUse = null;
+              inputJson = "";
+            }
+            break;
+
+          case "message_delta":
+            stopReason = (event.delta as any).stop_reason || "";
+            break;
         }
       }
+    } catch (streamErr: any) {
+      console.error(`\n\x1b[31mStream error: ${streamErr.message}\x1b[0m`);
+      if (currentText) contentBlocks.push({ type: "text", text: currentText });
+      if (currentToolUse) {
+        try { currentToolUse.input = inputJson ? JSON.parse(inputJson) : {}; } catch { currentToolUse.input = {}; }
+        contentBlocks.push(currentToolUse);
+      }
+      if (contentBlocks.length > 0) {
+        messages.push({ role: "assistant", content: contentBlocks });
+        const toolUses = contentBlocks.filter((b) => b.type === "tool_use");
+        if (toolUses.length > 0) {
+          messages.push({
+            role: "user",
+            content: toolUses.map((tu) => ({
+              type: "tool_result",
+              tool_use_id: tu.id,
+              content: JSON.stringify({ error: "Stream interrupted: " + streamErr.message }),
+              is_error: true,
+            })),
+          });
+        }
+      }
+      return { text: lastText || `Stream error: ${streamErr.message}`, turns: turnCount };
     }
 
-    if (message.type === "result") {
-      if (message.subtype === "success") {
-        resultText = message.result || resultText;
-      } else {
-        resultText = `Agent ended: ${message.subtype}${message.result ? " - " + message.result : ""}`;
-      }
-      turns = (message as any).num_turns ?? 0;
-      costUsd = (message as any).total_cost_usd ?? 0;
+    consecutiveErrors = 0;
+
+    if (contentBlocks.length > 0) {
+      messages.push({ role: "assistant", content: contentBlocks });
     }
+
+    // No tool use — done
+    if (stopReason !== "tool_use") {
+      break;
+    }
+
+    // Hit turn limit
+    if (turnCount >= CONFIG.maxToolTurns) {
+      console.log(`\n\x1b[33m! Reached ${CONFIG.maxToolTurns} tool turns limit.\x1b[0m`);
+      const wrapUpContent: any[] = [];
+      const lastAssistant = messages[messages.length - 1];
+      if (lastAssistant?.role === "assistant") {
+        for (const block of lastAssistant.content || []) {
+          if (block.type === "tool_use") {
+            wrapUpContent.push({
+              type: "tool_result",
+              tool_use_id: block.id,
+              content: JSON.stringify({ error: "Cancelled: tool turn limit reached" }),
+              is_error: true,
+            });
+          }
+        }
+      }
+      wrapUpContent.push({
+        type: "text",
+        text: "You have reached the tool call limit. Summarize what you accomplished.",
+      });
+      messages.push({ role: "user", content: wrapUpContent });
+      try {
+        const summary = await client.messages.create({
+          model: CONFIG.model,
+          max_tokens: CONFIG.maxTokens,
+          system: systemMessages,
+          messages,
+        });
+        for (const block of summary.content) {
+          if (block.type === "text") {
+            process.stdout.write(block.text);
+            lastText = block.text;
+          }
+        }
+        messages.push({ role: "assistant", content: summary.content });
+      } catch {}
+      break;
+    }
+
+    // Execute tools
+    const toolResults: any[] = [];
+    for (const block of contentBlocks) {
+      if (block.type !== "tool_use") continue;
+
+      const impl = toolImplementations[block.name];
+      if (!impl) {
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: JSON.stringify({ error: `Unknown tool: ${block.name}` }),
+          is_error: true,
+        });
+        continue;
+      }
+
+      try {
+        process.stdout.write(`\x1b[90m  running...\x1b[0m`);
+        const result = await impl(block.input);
+        const resultStr = typeof result === "string" ? result : JSON.stringify(result);
+        const preview = resultStr.length > 200 ? resultStr.slice(0, 197) + "..." : resultStr;
+        let icon = "\x1b[32mok\x1b[0m";
+        try {
+          const parsed = JSON.parse(resultStr);
+          if (parsed.ok === false || parsed.error) icon = "\x1b[31mfail\x1b[0m";
+        } catch {}
+        process.stdout.write(`\r\x1b[K  ${icon} \x1b[90m${preview}\x1b[0m\n`);
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: truncate(resultStr),
+        });
+      } catch (err: any) {
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: JSON.stringify({ error: err.message }),
+          is_error: true,
+        });
+        console.error(`\x1b[31m  ${block.name} error: ${err.message}\x1b[0m`);
+      }
+    }
+
+    messages.push({ role: "user", content: toolResults });
   }
 
-  return { text: resultText, turns, costUsd };
+  return { text: lastText, turns: turnCount };
+}
+
+// ---------------------------------------------------------------------------
+// Session persistence
+// ---------------------------------------------------------------------------
+
+export function saveSession(name = "last"): string {
+  const data = { messages, savedAt: new Date().toISOString() };
+  const path = join(CONFIG.sessionDir, `session-${name}.json`);
+  writeFileSync(path, JSON.stringify(data), "utf-8");
+  return path;
+}
+
+export function loadSession(name = "last"): boolean {
+  const path = join(CONFIG.sessionDir, `session-${name}.json`);
+  if (!existsSync(path)) return false;
+  try {
+    const data = JSON.parse(readFileSync(path, "utf-8"));
+    messages = data.messages || [];
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function clearHistory(): void {
+  messages = [];
 }

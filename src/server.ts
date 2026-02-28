@@ -20,11 +20,7 @@ app.post("/command", async (req, res) => {
 
   try {
     const result = await runAgent(prompt);
-    res.json({
-      result: result.text,
-      turns: result.turns,
-      costUsd: result.costUsd,
-    });
+    res.json({ result: result.text, turns: result.turns });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -32,6 +28,4 @@ app.post("/command", async (req, res) => {
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Siri2 HTTP server listening on 0.0.0.0:${PORT}`);
-  console.log(`  POST /command  - Send a command`);
-  console.log(`  GET  /health   - Health check`);
 });
