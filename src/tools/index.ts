@@ -8,8 +8,85 @@ import { scheduler } from "../services/scheduler.js";
 // ---------------------------------------------------------------------------
 
 export const UI_TOOLS = new Set([
-  "dump_ui_tree", "tap", "input_text", "press_key", "swipe", "take_screenshot",
+  "dump_ui_tree", "find_and_tap", "tap", "input_text", "press_key", "swipe", "take_screenshot",
 ]);
+
+// ---------------------------------------------------------------------------
+// Auto-dump: action tools that get an automatic UI dump appended
+// ---------------------------------------------------------------------------
+
+export const ACTION_TOOLS_WITH_AUTO_DUMP = new Set([
+  "tap", "swipe", "press_key", "input_text", "launch_app",
+]);
+
+export const AUTO_DUMP_DELAY: Record<string, number> = {
+  tap: 200,
+  press_key: 200,
+  input_text: 200,
+  swipe: 300,
+  launch_app: 800,
+};
+
+// ---------------------------------------------------------------------------
+// UI dump caching — prevents redundant dumps within a short window
+// ---------------------------------------------------------------------------
+
+let lastDumpResult: string | null = null;
+let lastDumpTime = 0;
+let dumpInvalidated = true;
+const DUMP_CACHE_TTL = 1500;
+
+export function invalidateDumpCache(): void {
+  dumpInvalidated = true;
+}
+
+// ---------------------------------------------------------------------------
+// Compact UI dump formatting
+// ---------------------------------------------------------------------------
+
+function formatCompactNode(n: any, i: number): string {
+  const parts: string[] = [];
+  if (n.text) parts.push(`"${n.text}"`);
+  if (n.contentDesc && n.contentDesc !== n.text) parts.push(`desc:"${n.contentDesc}"`);
+  parts.push(`(${n.centerX},${n.centerY})`);
+  if (n.clickable) parts.push("CLICK");
+  if (n.scrollable) parts.push("SCROLL");
+  if (n.checked) parts.push("CHK");
+  if (n.focused) parts.push("FOC");
+  if (n.resourceId) {
+    const shortId = n.resourceId.includes("/") ? n.resourceId.split("/").pop() : n.resourceId;
+    parts.push(`id:${shortId}`);
+  }
+  return `[${i}] ${parts.join(" ")}`;
+}
+
+async function performUiDump(): Promise<string> {
+  const now = Date.now();
+  if (!dumpInvalidated && lastDumpResult && (now - lastDumpTime) < DUMP_CACHE_TTL) {
+    return lastDumpResult;
+  }
+
+  const dump = await executeShell(
+    "uiautomator dump /sdcard/window_dump.xml && cat /sdcard/window_dump.xml",
+    { timeout: 15_000 }
+  );
+  if (dump.exitCode !== 0 || !dump.stdout.includes("<hierarchy")) {
+    return JSON.stringify({ ok: false, error: dump.stderr || "Failed to dump UI tree" });
+  }
+  const tree = parseUiDump(dump.stdout);
+  const formatted = tree.nodes.map((n, i) => formatCompactNode(n, i));
+  const result = JSON.stringify({
+    ok: true,
+    packageName: tree.packageName,
+    elementCount: tree.nodes.length,
+    elements: formatted.join("\n"),
+  });
+
+  lastDumpResult = result;
+  lastDumpTime = Date.now();
+  dumpInvalidated = false;
+  return result;
+}
 
 // ---------------------------------------------------------------------------
 // Tool registry
@@ -34,36 +111,9 @@ function defineTool(
 export const toolDefs = [
   defineTool(
     "dump_ui_tree",
-    "Dump the current Android UI tree. Returns all visible UI elements with text, positions, and whether they are clickable/scrollable. Use this before interacting with the screen.",
+    "Dump the current Android UI tree. Returns all visible UI elements with text, positions, and whether they are clickable/scrollable. Note: after action tools (tap, swipe, press_key, input_text, launch_app), a UI dump is automatically appended — you don't need to call this again.",
     { type: "object", properties: {} },
-    async () => {
-      const dump = await executeShell(
-        "uiautomator dump /sdcard/window_dump.xml && cat /sdcard/window_dump.xml",
-        { timeout: 15_000 }
-      );
-      if (dump.exitCode !== 0 || !dump.stdout.includes("<hierarchy")) {
-        return JSON.stringify({ ok: false, error: dump.stderr || "Failed to dump UI tree" });
-      }
-      const tree = parseUiDump(dump.stdout);
-      const formatted = tree.nodes.map((n, i) => {
-        const parts: string[] = [];
-        if (n.text) parts.push(`text="${n.text}"`);
-        if (n.contentDesc) parts.push(`desc="${n.contentDesc}"`);
-        if (n.resourceId) parts.push(`id="${n.resourceId}"`);
-        parts.push(`pos=(${n.centerX},${n.centerY})`);
-        if (n.clickable) parts.push("CLICKABLE");
-        if (n.scrollable) parts.push("SCROLLABLE");
-        if (n.checked) parts.push("CHECKED");
-        if (n.focused) parts.push("FOCUSED");
-        return `[${i}] ${parts.join(" | ")}`;
-      });
-      return JSON.stringify({
-        ok: true,
-        packageName: tree.packageName,
-        elementCount: tree.nodes.length,
-        elements: formatted.join("\n"),
-      });
-    }
+    async () => performUiDump()
   ),
 
   defineTool(
@@ -80,6 +130,58 @@ export const toolDefs = [
     async (args) => {
       const r = await executeShell(`input tap ${args.x} ${args.y}`);
       return JSON.stringify({ ok: r.exitCode === 0, action: `tapped (${args.x},${args.y})` });
+    }
+  ),
+
+  defineTool(
+    "find_and_tap",
+    "Find a UI element by text and tap it. Combines dump_ui_tree + tap into one call. Returns the matched element info and a post-tap UI dump. If no match is found, returns the current UI tree so you can see what's on screen.",
+    {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "Substring to match (case-insensitive) against element text or content description" },
+        index: { type: "number", description: "If multiple matches, which one to tap (0-based, default 0)" },
+      },
+      required: ["text"],
+    },
+    async (args) => {
+      invalidateDumpCache();
+      const dump = await executeShell(
+        "uiautomator dump /sdcard/window_dump.xml && cat /sdcard/window_dump.xml",
+        { timeout: 15_000 }
+      );
+      if (dump.exitCode !== 0 || !dump.stdout.includes("<hierarchy")) {
+        return JSON.stringify({ ok: false, error: dump.stderr || "Failed to dump UI tree" });
+      }
+      const tree = parseUiDump(dump.stdout);
+      const query = args.text.toLowerCase();
+      const matches = tree.nodes.filter(
+        (n) =>
+          n.text?.toLowerCase().includes(query) ||
+          n.contentDesc?.toLowerCase().includes(query)
+      );
+      if (matches.length === 0) {
+        const formatted = tree.nodes.map((n, i) => formatCompactNode(n, i));
+        return JSON.stringify({
+          ok: false,
+          error: `No element matching "${args.text}" found`,
+          packageName: tree.packageName,
+          elementCount: tree.nodes.length,
+          elements: formatted.join("\n"),
+        });
+      }
+      const idx = args.index || 0;
+      const target = matches[Math.min(idx, matches.length - 1)];
+      await executeShell(`input tap ${target.centerX} ${target.centerY}`);
+      await new Promise((r) => setTimeout(r, 200));
+      invalidateDumpCache();
+      const postDump = await performUiDump();
+      return JSON.stringify({
+        ok: true,
+        tapped: { text: target.text, desc: target.contentDesc, pos: [target.centerX, target.centerY] },
+        matchCount: matches.length,
+        uiDump: JSON.parse(postDump),
+      });
     }
   ),
 

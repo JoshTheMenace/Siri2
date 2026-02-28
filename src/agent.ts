@@ -1,6 +1,9 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { SYSTEM_PROMPT } from "./system-prompt.js";
-import { toolDefs, toolImplementations, UI_TOOLS } from "./tools/index.js";
+import {
+  toolDefs, toolImplementations, UI_TOOLS,
+  ACTION_TOOLS_WITH_AUTO_DUMP, AUTO_DUMP_DELAY, invalidateDumpCache,
+} from "./tools/index.js";
 import { deviceLock } from "./services/device-lock.js";
 import { NOTIFICATION_TRIAGE_PROMPT } from "./system-prompt.js";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
@@ -350,14 +353,37 @@ export async function runAgent(userText: string, options?: AgentOptions): Promis
       try {
         process.stdout.write(`\x1b[90m  running...\x1b[0m`);
         const result = await impl(block.input);
-        const resultStr = typeof result === "string" ? result : JSON.stringify(result);
-        const preview = resultStr.length > 200 ? resultStr.slice(0, 197) + "..." : resultStr;
-        let icon = "\x1b[32mok\x1b[0m";
-        try {
-          const parsed = JSON.parse(resultStr);
-          if (parsed.ok === false || parsed.error) icon = "\x1b[31mfail\x1b[0m";
-        } catch {}
-        process.stdout.write(`\r\x1b[K  ${icon} \x1b[90m${preview}\x1b[0m\n`);
+        let resultStr = typeof result === "string" ? result : JSON.stringify(result);
+
+        // Auto-dump: after action tools, wait briefly and append a UI dump
+        if (ACTION_TOOLS_WITH_AUTO_DUMP.has(block.name)) {
+          const delay = AUTO_DUMP_DELAY[block.name] || 200;
+          await new Promise((r) => setTimeout(r, delay));
+          invalidateDumpCache();
+          try {
+            const autoDumpImpl = toolImplementations["dump_ui_tree"];
+            const dumpResult = await autoDumpImpl({});
+            const combined = {
+              action: JSON.parse(resultStr),
+              autoDump: JSON.parse(dumpResult),
+            };
+            resultStr = JSON.stringify(combined);
+            process.stdout.write(`\r\x1b[K  \x1b[32mok\x1b[0m + auto-dump\n`);
+          } catch {
+            // If auto-dump fails, just return the action result
+            const preview = resultStr.length > 200 ? resultStr.slice(0, 197) + "..." : resultStr;
+            process.stdout.write(`\r\x1b[K  \x1b[32mok\x1b[0m \x1b[90m${preview}\x1b[0m\n`);
+          }
+        } else {
+          const preview = resultStr.length > 200 ? resultStr.slice(0, 197) + "..." : resultStr;
+          let icon = "\x1b[32mok\x1b[0m";
+          try {
+            const parsed = JSON.parse(resultStr);
+            if (parsed.ok === false || parsed.error) icon = "\x1b[31mfail\x1b[0m";
+          } catch {}
+          process.stdout.write(`\r\x1b[K  ${icon} \x1b[90m${preview}\x1b[0m\n`);
+        }
+
         toolResults.push({
           type: "tool_result",
           tool_use_id: block.id,
