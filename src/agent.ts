@@ -1,6 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { SYSTEM_PROMPT } from "./system-prompt.js";
-import { toolDefs, toolImplementations } from "./tools/index.js";
+import { toolDefs, toolImplementations, UI_TOOLS } from "./tools/index.js";
+import { deviceLock } from "./services/device-lock.js";
+import { NOTIFICATION_TRIAGE_PROMPT } from "./system-prompt.js";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -125,7 +127,12 @@ export interface AgentResult {
   turns: number;
 }
 
-export async function runAgent(userText: string): Promise<AgentResult> {
+export interface AgentOptions {
+  agentId?: string;
+}
+
+export async function runAgent(userText: string, options?: AgentOptions): Promise<AgentResult> {
+  const agentId = options?.agentId;
   if (consecutiveErrors >= 2) {
     console.log("\x1b[33m! Auto-clearing history after repeated errors.\x1b[0m");
     messages.length = 0;
@@ -328,6 +335,18 @@ export async function runAgent(userText: string): Promise<AgentResult> {
         continue;
       }
 
+      // Lock check: if this is a UI tool and lock is held by someone else, block it
+      if (agentId && UI_TOOLS.has(block.name) && deviceLock.isLocked() && !deviceLock.isLockedBy(agentId)) {
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: JSON.stringify({ error: "Device is locked by another owner. Wrap up your work." }),
+          is_error: true,
+        });
+        console.log(`\x1b[33m  blocked (device locked)\x1b[0m`);
+        continue;
+      }
+
       try {
         process.stdout.write(`\x1b[90m  running...\x1b[0m`);
         const result = await impl(block.input);
@@ -359,6 +378,172 @@ export async function runAgent(userText: string): Promise<AgentResult> {
   }
 
   return { text: lastText, turns: turnCount };
+}
+
+// ---------------------------------------------------------------------------
+// Triage agent — lightweight agent for notification handling
+// ---------------------------------------------------------------------------
+
+export interface TriageResult {
+  action: "ignore" | "log" | "act";
+  reason: string;
+}
+
+export async function runTriageAgent(notification: {
+  packageName: string;
+  title: string;
+  text: string;
+  actions: string[];
+}): Promise<TriageResult> {
+  const triageId = `triage-${Date.now()}`;
+  const triageMessages: any[] = [
+    {
+      role: "user",
+      content: `New notification received:\n\nApp: ${notification.packageName}\nTitle: ${notification.title}\nText: ${notification.text}\nActions: ${notification.actions.join(", ") || "none"}\n\nDecide what to do with this notification.`,
+    },
+  ];
+
+  const triageSystem: any = useOAuth
+    ? [
+        { type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." },
+        { type: "text", text: NOTIFICATION_TRIAGE_PROMPT },
+      ]
+    : NOTIFICATION_TRIAGE_PROMPT;
+
+  const maxTriageTurns = 5;
+  let turnCount = 0;
+  let lastText = "";
+
+  while (turnCount < maxTriageTurns) {
+    turnCount++;
+
+    let response;
+    try {
+      response = await client.messages.create({
+        model: CONFIG.model,
+        max_tokens: 2048,
+        system: triageSystem,
+        messages: triageMessages,
+        tools: toolDefs as any,
+        stream: true,
+      });
+    } catch (err: any) {
+      console.error(`\x1b[31m[triage] API error: ${err.message}\x1b[0m`);
+      return { action: "ignore", reason: `API error: ${err.message}` };
+    }
+
+    const contentBlocks: any[] = [];
+    let currentText = "";
+    let currentToolUse: any = null;
+    let stopReason = "";
+    let inputJson = "";
+
+    try {
+      for await (const event of response) {
+        switch (event.type) {
+          case "content_block_start":
+            if (event.content_block.type === "text") {
+              currentText = "";
+            } else if (event.content_block.type === "tool_use") {
+              currentToolUse = {
+                type: "tool_use",
+                id: event.content_block.id,
+                name: event.content_block.name,
+                input: {},
+              };
+              inputJson = "";
+              console.log(`\x1b[36m  [triage] > ${event.content_block.name}\x1b[0m`);
+            }
+            break;
+          case "content_block_delta":
+            if (event.delta.type === "text_delta") {
+              currentText += event.delta.text;
+            } else if (event.delta.type === "input_json_delta") {
+              inputJson += event.delta.partial_json;
+            }
+            break;
+          case "content_block_stop":
+            if (currentText) {
+              contentBlocks.push({ type: "text", text: currentText });
+              lastText = currentText;
+              currentText = "";
+            }
+            if (currentToolUse) {
+              try { currentToolUse.input = inputJson ? JSON.parse(inputJson) : {}; } catch { currentToolUse.input = {}; }
+              contentBlocks.push(currentToolUse);
+              currentToolUse = null;
+              inputJson = "";
+            }
+            break;
+          case "message_delta":
+            stopReason = (event.delta as any).stop_reason || "";
+            break;
+        }
+      }
+    } catch (err: any) {
+      console.error(`\x1b[31m[triage] Stream error: ${err.message}\x1b[0m`);
+      return { action: "ignore", reason: `Stream error: ${err.message}` };
+    }
+
+    if (contentBlocks.length > 0) {
+      triageMessages.push({ role: "assistant", content: contentBlocks });
+    }
+
+    if (stopReason !== "tool_use") break;
+
+    // Execute tools for triage agent
+    const toolResults: any[] = [];
+    for (const block of contentBlocks) {
+      if (block.type !== "tool_use") continue;
+
+      // Lock check for triage agent
+      if (UI_TOOLS.has(block.name) && deviceLock.isLocked() && !deviceLock.isLockedBy(triageId)) {
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: JSON.stringify({ error: "Device locked by another owner" }),
+          is_error: true,
+        });
+        continue;
+      }
+
+      const impl = toolImplementations[block.name];
+      if (!impl) {
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: JSON.stringify({ error: `Unknown tool: ${block.name}` }),
+          is_error: true,
+        });
+        continue;
+      }
+
+      try {
+        const result = await impl(block.input);
+        const resultStr = typeof result === "string" ? result : JSON.stringify(result);
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: truncate(resultStr),
+        });
+      } catch (err: any) {
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: JSON.stringify({ error: err.message }),
+          is_error: true,
+        });
+      }
+    }
+
+    triageMessages.push({ role: "user", content: toolResults });
+  }
+
+  // Parse the triage decision from the last text
+  const lower = lastText.toLowerCase();
+  if (lower.includes("act")) return { action: "act", reason: lastText };
+  if (lower.includes("log")) return { action: "log", reason: lastText };
+  return { action: "ignore", reason: lastText };
 }
 
 // ---------------------------------------------------------------------------

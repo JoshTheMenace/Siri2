@@ -3,6 +3,14 @@ import { parseUiDump } from "../services/xml-parser.js";
 import { getNotifications } from "../services/notification-watcher.js";
 
 // ---------------------------------------------------------------------------
+// UI tools that require device lock
+// ---------------------------------------------------------------------------
+
+export const UI_TOOLS = new Set([
+  "dump_ui_tree", "tap", "input_text", "press_key", "swipe", "take_screenshot",
+]);
+
+// ---------------------------------------------------------------------------
 // Tool registry
 // ---------------------------------------------------------------------------
 

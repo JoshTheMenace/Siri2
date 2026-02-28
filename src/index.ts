@@ -2,6 +2,7 @@
 import "dotenv/config";
 import { createInterface } from "node:readline";
 import { runAgent, saveSession, loadSession, clearHistory } from "./agent.js";
+import { initAppContext } from "./services/app-context.js";
 
 if (!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
   console.error(
@@ -14,6 +15,7 @@ if (!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
   process.exit(1);
 }
 
+const ctx = initAppContext();
 const isInteractive = process.stdin.isTTY;
 
 if (isInteractive) {
@@ -24,7 +26,7 @@ if (isInteractive) {
     "================================\n" +
     "  Siri2 - Android AI Agent\n" +
     "================================\x1b[0m\n" +
-    "\x1b[90mCommands: /quit /save /load /clear /help\x1b[0m\n"
+    "\x1b[90mCommands: /quit /save /load /clear /watch /lock /filter /help\x1b[0m\n"
   );
 
   function showPrompt() {
@@ -40,6 +42,9 @@ if (isInteractive) {
     if (input.startsWith("/")) {
       const [cmd, ...rest] = input.split(/\s+/);
       const arg = rest.join(" ");
+      const subCmd = rest[0];
+      const subArg = rest.slice(1).join(" ");
+
       switch (cmd) {
         case "/quit": case "/exit": case "/q":
           saveSession();
@@ -57,8 +62,103 @@ if (isInteractive) {
           clearHistory();
           console.log("\x1b[90mHistory cleared.\x1b[0m");
           break;
+
+        case "/watch":
+          switch (subCmd) {
+            case "start":
+              ctx.notificationQueue.start();
+              console.log("\x1b[32mNotification watcher started.\x1b[0m");
+              break;
+            case "stop":
+              ctx.notificationQueue.stop();
+              console.log("\x1b[33mNotification watcher stopped.\x1b[0m");
+              break;
+            case "status":
+              console.log(JSON.stringify({
+                running: ctx.notificationQueue.isRunning(),
+                queueLength: ctx.notificationQueue.getQueueLength(),
+                filterCount: ctx.notificationFilter.getWhitelist().length,
+              }, null, 2));
+              break;
+            case "log": {
+              const log = ctx.notificationQueue.getTriageLog();
+              if (log.length === 0) {
+                console.log("\x1b[90mNo triage log entries.\x1b[0m");
+              } else {
+                for (const entry of log.slice(-20)) {
+                  const time = new Date(entry.timestamp).toLocaleTimeString();
+                  console.log(`  \x1b[90m${time}\x1b[0m ${entry.action.toUpperCase().padEnd(6)} ${entry.packageName} — ${entry.title}`);
+                  if (entry.reason) console.log(`         \x1b[90m${entry.reason.slice(0, 100)}\x1b[0m`);
+                }
+              }
+              break;
+            }
+            default:
+              console.log("\x1b[33mUsage: /watch start|stop|status|log\x1b[0m");
+          }
+          break;
+
+        case "/lock":
+          switch (subCmd) {
+            case "status":
+              console.log(JSON.stringify(ctx.deviceLock.getState(), null, 2));
+              break;
+            case "release":
+              ctx.deviceLock.forceRelease();
+              console.log("\x1b[32mDevice lock released.\x1b[0m");
+              break;
+            default:
+              console.log("\x1b[33mUsage: /lock status|release\x1b[0m");
+          }
+          break;
+
+        case "/filter":
+          switch (subCmd) {
+            case "list":
+              const pkgs = ctx.notificationFilter.getWhitelist();
+              if (pkgs.length === 0) {
+                console.log("\x1b[90mWhitelist is empty (no notifications will trigger the agent).\x1b[0m");
+              } else {
+                for (const pkg of pkgs) console.log(`  ${pkg}`);
+              }
+              break;
+            case "add":
+              if (!subArg) {
+                console.log("\x1b[33mUsage: /filter add <package.name>\x1b[0m");
+              } else {
+                ctx.notificationFilter.addPackage(subArg);
+                console.log(`\x1b[32mAdded: ${subArg}\x1b[0m`);
+              }
+              break;
+            case "remove":
+              if (!subArg) {
+                console.log("\x1b[33mUsage: /filter remove <package.name>\x1b[0m");
+              } else {
+                ctx.notificationFilter.removePackage(subArg);
+                console.log(`\x1b[32mRemoved: ${subArg}\x1b[0m`);
+              }
+              break;
+            default:
+              console.log("\x1b[33mUsage: /filter list|add <pkg>|remove <pkg>\x1b[0m");
+          }
+          break;
+
         case "/help":
-          console.log("/quit /save [name] /load [name] /clear");
+          console.log(
+            "/quit             Exit (saves session)\n" +
+            "/save [name]      Save session\n" +
+            "/load [name]      Load session\n" +
+            "/clear            Clear history\n" +
+            "/watch start      Start notification watcher\n" +
+            "/watch stop       Stop notification watcher\n" +
+            "/watch status     Show watcher status\n" +
+            "/watch log        Show triage log\n" +
+            "/lock status      Show device lock status\n" +
+            "/lock release     Force-release device lock\n" +
+            "/filter list      Show whitelisted packages\n" +
+            "/filter add <pkg> Add package to whitelist\n" +
+            "/filter remove <pkg> Remove package from whitelist"
+          );
           break;
         default:
           console.log(`\x1b[33mUnknown: ${cmd}\x1b[0m`);
